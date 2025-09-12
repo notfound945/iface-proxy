@@ -82,6 +82,9 @@ curl -x http://127.0.0.1:7890 -I https://example.com -v --connect-timeout 5 --ma
 # h2（TLS+ALPN），需提供证书与私钥（PEM）
 ./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890 \
   --tls-cert cert.pem --tls-key key.pem
+
+# 显式关闭 HTTP/2（强制仅 HTTP/1.x）
+./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890 --no-http2
 ```
 
 ### curl 测试（SOCKS5）
@@ -119,6 +122,9 @@ make build           # 调试构建
 make release         # 发布构建
 make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass TLS_CERT=cert.pem TLS_KEY=key.pem
 make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass TLS_CERT=cert.pem TLS_KEY=key.pem
+
+# 仅 HTTP/1.x（禁用 HTTP/2）
+make run IFACE=en0 NO_HTTP2=1
 make strip           # 去符号减小体积（macOS）
 make linux-musl      # 构建 Linux musl 静态二进制
 ```
