@@ -1,6 +1,8 @@
 use anyhow::Result;
 
-mod proxy;
+mod util;
+mod http_proxy;
+mod socks5;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,13 +43,13 @@ async fn main() -> Result<()> {
 
     let http_iface = iface.clone();
     let http_listen = listen.clone();
-    let http_task = tokio::spawn(async move { proxy::run_http_proxy(&http_iface, &http_listen).await });
+    let http_task = tokio::spawn(async move { http_proxy::run_http_proxy(&http_iface, &http_listen).await });
 
     if let Some(s5_addr) = socks5_listen {
         let s5_iface = iface.clone();
         let s5_user_cloned = socks5_user.clone();
         let s5_pass_cloned = socks5_pass.clone();
-        tokio::spawn(async move { let _ = proxy::run_socks5_proxy_auth(&s5_iface, &s5_addr, s5_user_cloned.as_deref(), s5_pass_cloned.as_deref()).await; });
+        tokio::spawn(async move { let _ = socks5::run_socks5_proxy_auth(&s5_iface, &s5_addr, s5_user_cloned.as_deref(), s5_pass_cloned.as_deref()).await; });
     }
 
     let _ = http_task.await;
