@@ -74,29 +74,52 @@ where
 
 /// 处理 SOCKS5 握手 & TCP 代理
 async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
-    let mut buf = [0u8; 262];
-    inbound.read(&mut buf).await?; // 认证方法请求
-    inbound.write_all(&[0x05, 0x00]).await?; // 不认证
-
-    let n = inbound.read(&mut buf).await?;
-    if n < 7 {
-        anyhow::bail!("Invalid SOCKS5 request");
+    // 1) 握手：VER | NMETHODS | METHODS
+    let mut greeting = [0u8; 2];
+    inbound.read_exact(&mut greeting).await?;
+    if greeting[0] != 0x05 {
+        anyhow::bail!("Invalid SOCKS5 version in greeting");
     }
+    let nmethods = greeting[1] as usize;
+    if nmethods > 0 {
+        let mut methods = vec![0u8; nmethods];
+        inbound.read_exact(&mut methods).await?;
+    }
+    // 响应：VER=5, METHOD=0x00(不认证)
+    inbound.write_all(&[0x05, 0x00]).await?;
 
-    let cmd = buf[1];
-    let atyp = buf[3];
+    // 2) 请求：VER | CMD | RSV | ATYP | DST.ADDR | DST.PORT
+    let mut req_head = [0u8; 4];
+    inbound.read_exact(&mut req_head).await?;
+    if req_head[0] != 0x05 {
+        anyhow::bail!("Invalid SOCKS5 version in request");
+    }
+    let cmd = req_head[1];
+    let atyp = req_head[3];
 
     // 生成用于日志的地址字符串，以及待连接的 IPv4 地址列表
     let (addr_display, mut target_v4_list): (String, Vec<std::net::SocketAddrV4>) = match atyp {
         0x01 => {
-            let ip = std::net::Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
-            let port = u16::from_be_bytes([buf[8], buf[9]]);
+            // IPv4: 4 字节 + 2 字节端口
+            let mut v4 = [0u8; 4];
+            inbound.read_exact(&mut v4).await?;
+            let ip = std::net::Ipv4Addr::new(v4[0], v4[1], v4[2], v4[3]);
+            let mut p = [0u8; 2];
+            inbound.read_exact(&mut p).await?;
+            let port = u16::from_be_bytes(p);
             (format!("{}:{}", ip, port), vec![std::net::SocketAddrV4::new(ip, port)])
         }
         0x03 => {
-            let len = buf[4] as usize;
-            let host = String::from_utf8_lossy(&buf[5..5+len]).to_string();
-            let port = u16::from_be_bytes([buf[5+len], buf[6+len]]);
+            // 域名: LEN | HOST(LEN) | PORT(2)
+            let mut l = [0u8; 1];
+            inbound.read_exact(&mut l).await?;
+            let len = l[0] as usize;
+            let mut host_bytes = vec![0u8; len];
+            if len > 0 { inbound.read_exact(&mut host_bytes).await?; }
+            let host = String::from_utf8_lossy(&host_bytes).to_string();
+            let mut p = [0u8; 2];
+            inbound.read_exact(&mut p).await?;
+            let port = u16::from_be_bytes(p);
             let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
             let v4_only: Vec<std::net::SocketAddrV4> = addrs
                 .filter_map(|sa| match sa {
