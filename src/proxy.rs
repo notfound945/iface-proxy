@@ -284,4 +284,110 @@ pub async fn run_http_proxy(iface: &str, listen: &str) -> Result<()> {
     }
 }
 
+// -------------------- SOCKS5 Proxy --------------------
+
+async fn read_exact_into(stream: &mut TcpStream, buf: &mut [u8]) -> Result<()> {
+    stream.read_exact(buf).await?;
+    Ok(())
+}
+
+async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
+    // Greeting: VER | NMETHODS | METHODS
+    let mut g = [0u8; 2];
+    read_exact_into(&mut inbound, &mut g).await?;
+    if g[0] != 5 {
+        anyhow::bail!("Invalid SOCKS5 version in greeting");
+    }
+    let nmethods = g[1] as usize;
+    if nmethods > 0 {
+        let mut methods = vec![0u8; nmethods];
+        inbound.read_exact(&mut methods).await?;
+    }
+    // No auth
+    inbound.write_all(&[0x05, 0x00]).await?;
+
+    // Request: VER | CMD | RSV | ATYP
+    let mut h = [0u8; 4];
+    read_exact_into(&mut inbound, &mut h).await?;
+    if h[0] != 5 {
+        anyhow::bail!("Invalid SOCKS5 version in request");
+    }
+    let cmd = h[1];
+    let atyp = h[3];
+
+    let (target_host, target_port) = match atyp {
+        0x01 => {
+            // IPv4
+            let mut v4 = [0u8; 4];
+            read_exact_into(&mut inbound, &mut v4).await?;
+            let ip = std::net::Ipv4Addr::new(v4[0], v4[1], v4[2], v4[3]);
+            let mut p = [0u8; 2];
+            read_exact_into(&mut inbound, &mut p).await?;
+            let port = u16::from_be_bytes(p);
+            (ip.to_string(), port)
+        }
+        0x03 => {
+            // Domain
+            let mut l = [0u8; 1];
+            read_exact_into(&mut inbound, &mut l).await?;
+            let len = l[0] as usize;
+            let mut host_bytes = vec![0u8; len];
+            if len > 0 {
+                inbound.read_exact(&mut host_bytes).await?;
+            }
+            let host = String::from_utf8_lossy(&host_bytes).to_string();
+            let mut p = [0u8; 2];
+            read_exact_into(&mut inbound, &mut p).await?;
+            let port = u16::from_be_bytes(p);
+            (host, port)
+        }
+        _ => anyhow::bail!("Unsupported ATYP"),
+    };
+
+    match cmd {
+        0x01 => {
+            // CONNECT
+            log_throttled(|| println!(
+                "SOCKS5 CONNECT -> {}:{} (iface: {})",
+                target_host, target_port, iface
+            ));
+            let mut outbound = connect_outbound_ipv4(&target_host, target_port, iface).await?;
+            // Success reply: VER, REP=0x00, RSV, ATYP=IPv4, BND.ADDR=0.0.0.0, BND.PORT=0
+            inbound
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await?;
+            let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
+            log_throttled(|| println!(
+                "SOCKS5 finished {}:{} (c->s: {} bytes, s->c: {} bytes)",
+                target_host, target_port, c2s, s2c
+            ));
+            Ok(())
+        }
+        0x03 => {
+            // UDP ASSOC - not supported here
+            anyhow::bail!("UDP ASSOC not supported")
+        }
+        _ => anyhow::bail!("Unsupported CMD"),
+    }
+}
+
+pub async fn run_socks5_proxy(iface: &str, listen: &str) -> Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    println!("SOCKS5 proxy listening on {}, bound to {}", listen, iface);
+    loop {
+        let (inbound, peer_addr) = listener.accept().await?;
+        let listen_for_log = listen.to_string();
+        log_throttled(|| println!(
+            "Incoming TCP connection from {} -> listening on {} (iface: {})",
+            peer_addr, listen_for_log, iface
+        ));
+        let iface_for_task = iface.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = handle_socks5(inbound, &iface_for_task).await {
+                eprintln!("SOCKS5 handler error: {}", e);
+            }
+        });
+    }
+}
+
 
