@@ -126,7 +126,6 @@ pub async fn run_http_proxy(iface: &str, listen: &str) -> Result<()> {
 
 #[derive(Clone, Default)]
 pub struct Http2Options {
-    pub enable_h2: bool,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
 }

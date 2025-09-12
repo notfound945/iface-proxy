@@ -8,7 +8,7 @@ mod socks5;
 async fn main() -> Result<()> {
     // 解析命令行参数中的 --iface/-i，默认 en0
     let mut iface = String::from("en0");
-    let mut listen = String::from("127.0.0.1:7891");
+    let mut listen = String::from("127.0.0.1:7890");
     let mut socks5_listen: Option<String> = Some(String::from("127.0.0.1:1080"));
     let mut socks5_user: Option<String> = None;
     let mut socks5_pass: Option<String> = None;
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     let http_iface = iface.clone();
     let http_listen = listen.clone();
     let http_task = if enable_h2 {
-        let opts = http_proxy::Http2Options { enable_h2: true, tls_cert, tls_key };
+        let opts = http_proxy::Http2Options { tls_cert, tls_key };
         tokio::spawn(async move { http_proxy::run_http_proxy_h2(&http_iface, &http_listen, opts).await })
     } else {
         tokio::spawn(async move { http_proxy::run_http_proxy(&http_iface, &http_listen).await })
