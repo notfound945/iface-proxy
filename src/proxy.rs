@@ -8,15 +8,21 @@ use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 #[cfg(target_os = "macos")]
-use nix::libc::{if_nametoindex, IPPROTO_IP, IP_BOUND_IF};
+use nix::libc::{if_nametoindex, IPPROTO_IP, IP_BOUND_IF, IPPROTO_IPV6, IPV6_BOUND_IF};
 
 #[cfg(target_os = "macos")]
-fn bind_iface(fd: i32, iface: &str) -> Result<()> {
+fn iface_index(iface: &str) -> Result<u32> {
     let cstr = CString::new(iface)?;
     let idx = unsafe { if_nametoindex(cstr.as_ptr()) };
     if idx == 0 {
         anyhow::bail!("Invalid iface: {}", iface);
     }
+    Ok(idx)
+}
+
+#[cfg(target_os = "macos")]
+fn bind_iface_v4(fd: i32, iface: &str) -> Result<()> {
+    let idx = iface_index(iface)?;
     let ret = unsafe {
         nix::libc::setsockopt(
             fd,
@@ -33,7 +39,33 @@ fn bind_iface(fd: i32, iface: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn bind_iface(fd: i32, iface: &str) -> Result<()> {
+fn bind_iface_v4(fd: i32, iface: &str) -> Result<()> {
+    use nix::sys::socket::setsockopt;
+    use nix::sys::socket::sockopt::BindToDevice;
+    setsockopt(fd, BindToDevice, iface.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn bind_iface_v6(fd: i32, iface: &str) -> Result<()> {
+    let idx = iface_index(iface)?;
+    let ret = unsafe {
+        nix::libc::setsockopt(
+            fd,
+            IPPROTO_IPV6,
+            IPV6_BOUND_IF,
+            &idx as *const _ as *const nix::libc::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if ret != 0 {
+        anyhow::bail!("setsockopt(IPV6_BOUND_IF) failed");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bind_iface_v6(fd: i32, iface: &str) -> Result<()> {
     use nix::sys::socket::setsockopt;
     use nix::sys::socket::sockopt::BindToDevice;
     setsockopt(fd, BindToDevice, iface.as_bytes())?;
@@ -134,31 +166,44 @@ fn parse_host_from_headers(headers: &str) -> Option<String> {
     None
 }
 
-async fn connect_outbound_ipv4(host: &str, port: u16, iface: &str) -> Result<TcpStream> {
+async fn connect_outbound(host: &str, port: u16, iface: &str) -> Result<TcpStream> {
     let addrs = tokio::net::lookup_host((host, port)).await?;
     let mut last_err: Option<anyhow::Error> = None;
     for sa in addrs {
-        if let std::net::SocketAddr::V4(v4) = sa {
-            let socket = TcpSocket::new_v4()?;
-            let fd = socket.as_raw_fd();
-            if let Err(e) = bind_iface(fd, iface) {
-                last_err = Some(e);
-                continue;
-            }
-            match socket.connect(std::net::SocketAddr::V4(v4)).await {
-                Ok(s) => return Ok(s),
-                Err(e) => {
-                    last_err = Some(anyhow::Error::new(e));
+        match sa {
+            std::net::SocketAddr::V4(v4) => {
+                let socket = TcpSocket::new_v4()?;
+                let fd = socket.as_raw_fd();
+                if let Err(e) = bind_iface_v4(fd, iface) {
+                    last_err = Some(e);
                     continue;
+                }
+                match socket.connect(std::net::SocketAddr::V4(v4)).await {
+                    Ok(s) => return Ok(s),
+                    Err(e) => {
+                        last_err = Some(anyhow::Error::new(e));
+                        continue;
+                    }
+                }
+            }
+            std::net::SocketAddr::V6(v6) => {
+                let socket = TcpSocket::new_v6()?;
+                let fd = socket.as_raw_fd();
+                if let Err(e) = bind_iface_v6(fd, iface) {
+                    last_err = Some(e);
+                    continue;
+                }
+                match socket.connect(std::net::SocketAddr::V6(v6)).await {
+                    Ok(s) => return Ok(s),
+                    Err(e) => {
+                        last_err = Some(anyhow::Error::new(e));
+                        continue;
+                    }
                 }
             }
         }
     }
-    if let Some(e) = last_err {
-        Err(e)
-    } else {
-        anyhow::bail!("no ipv4 address")
-    }
+    if let Some(e) = last_err { Err(e) } else { anyhow::bail!("no address") }
 }
 
 async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
@@ -175,7 +220,7 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
         let host = hp.next().unwrap_or("");
         let port: u16 = hp.next().unwrap_or("443").parse().unwrap_or(443);
         log_throttled(|| println!("HTTP CONNECT -> {}:{} (iface: {})", host, port, iface));
-        let mut outbound = connect_outbound_ipv4(host, port, iface).await?;
+        let mut outbound = connect_outbound(host, port, iface).await?;
         inbound
             .write_all(
                 b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: iface-proxy\r\n\r\n",
@@ -216,7 +261,7 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
     }
 
     log_throttled(|| println!("HTTP {} {} -> {}:{} (iface: {})", method, path, host, port, iface));
-    let mut outbound = connect_outbound_ipv4(&host, port, iface).await?;
+    let mut outbound = connect_outbound(&host, port, iface).await?;
 
     // 重写请求行与头：METHOD path HTTP/x.x + Host 头（去除 Proxy-Connection 等）
     let mut lines = headers_str.split("\r\n");
@@ -291,7 +336,7 @@ async fn read_exact_into(stream: &mut TcpStream, buf: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
+async fn handle_socks5(mut inbound: TcpStream, iface: &str, user: Option<&str>, pass: Option<&str>) -> Result<()> {
     // Greeting: VER | NMETHODS | METHODS
     let mut g = [0u8; 2];
     read_exact_into(&mut inbound, &mut g).await?;
@@ -299,12 +344,33 @@ async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
         anyhow::bail!("Invalid SOCKS5 version in greeting");
     }
     let nmethods = g[1] as usize;
-    if nmethods > 0 {
-        let mut methods = vec![0u8; nmethods];
-        inbound.read_exact(&mut methods).await?;
+    let mut methods = vec![0u8; nmethods];
+    if nmethods > 0 { inbound.read_exact(&mut methods).await?; }
+    let need_auth = user.is_some() || pass.is_some();
+    if need_auth {
+        // username/password method is 0x02
+        let use_userpass = methods.iter().any(|m| *m == 0x02);
+        if use_userpass { inbound.write_all(&[0x05, 0x02]).await?; } else { inbound.write_all(&[0x05, 0xFF]).await?; anyhow::bail!("client doesn't support username/password auth"); }
+        // subnegotiation: VER=1 | ULEN | UNAME | PLEN | PASSWD
+        let mut sb_ver = [0u8;1];
+        read_exact_into(&mut inbound, &mut sb_ver).await?;
+        if sb_ver[0] != 0x01 { anyhow::bail!("invalid auth subnegotiation version"); }
+        let mut ulen_b = [0u8;1];
+        read_exact_into(&mut inbound, &mut ulen_b).await?;
+        let ulen = ulen_b[0] as usize;
+        let mut ubytes = vec![0u8; ulen];
+        if ulen>0 { inbound.read_exact(&mut ubytes).await?; }
+        let mut plen_b = [0u8;1];
+        read_exact_into(&mut inbound, &mut plen_b).await?;
+        let plen = plen_b[0] as usize;
+        let mut pbytes = vec![0u8; plen];
+        if plen>0 { inbound.read_exact(&mut pbytes).await?; }
+        let ok = user.map(|u| u.as_bytes().to_vec()).as_deref()==Some(&ubytes[..]) && pass.map(|p| p.as_bytes().to_vec()).as_deref()==Some(&pbytes[..]);
+        if ok { inbound.write_all(&[0x01, 0x00]).await?; } else { inbound.write_all(&[0x01, 0x01]).await?; anyhow::bail!("invalid username/password"); }
+    } else {
+        // No auth
+        inbound.write_all(&[0x05, 0x00]).await?;
     }
-    // No auth
-    inbound.write_all(&[0x05, 0x00]).await?;
 
     // Request: VER | CMD | RSV | ATYP
     let mut h = [0u8; 4];
@@ -351,7 +417,7 @@ async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
                 "SOCKS5 CONNECT -> {}:{} (iface: {})",
                 target_host, target_port, iface
             ));
-            let mut outbound = connect_outbound_ipv4(&target_host, target_port, iface).await?;
+            let mut outbound = connect_outbound(&target_host, target_port, iface).await?;
             // Success reply: VER, REP=0x00, RSV, ATYP=IPv4, BND.ADDR=0.0.0.0, BND.PORT=0
             inbound
                 .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
@@ -371,6 +437,7 @@ async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 pub async fn run_socks5_proxy(iface: &str, listen: &str) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     println!("SOCKS5 proxy listening on {}, bound to {}", listen, iface);
@@ -383,7 +450,30 @@ pub async fn run_socks5_proxy(iface: &str, listen: &str) -> Result<()> {
         ));
         let iface_for_task = iface.to_string();
         tokio::spawn(async move {
-            if let Err(e) = handle_socks5(inbound, &iface_for_task).await {
+            if let Err(e) = handle_socks5(inbound, &iface_for_task, None, None).await {
+                eprintln!("SOCKS5 handler error: {}", e);
+            }
+        });
+    }
+}
+
+pub async fn run_socks5_proxy_auth(iface: &str, listen: &str, user: Option<&str>, pass: Option<&str>) -> Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    println!("SOCKS5 proxy listening on {}, bound to {}", listen, iface);
+    loop {
+        let (inbound, peer_addr) = listener.accept().await?;
+        let listen_for_log = listen.to_string();
+        let iface_for_task = iface.to_string();
+        let user_opt = user.map(|s| s.to_string());
+        let pass_opt = pass.map(|s| s.to_string());
+        log_throttled(|| println!(
+            "Incoming TCP connection from {} -> listening on {} (iface: {})",
+            peer_addr, listen_for_log, iface
+        ));
+        tokio::spawn(async move {
+            let u = user_opt.as_deref();
+            let p = pass_opt.as_deref();
+            if let Err(e) = handle_socks5(inbound, &iface_for_task, u, p).await {
                 eprintln!("SOCKS5 handler error: {}", e);
             }
         });

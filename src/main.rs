@@ -7,7 +7,9 @@ async fn main() -> Result<()> {
     // 解析命令行参数中的 --iface/-i，默认 en0
     let mut iface = String::from("en0");
     let mut listen = String::from("127.0.0.1:7891");
-    let mut socks5_listen: Option<String> = None;
+    let mut socks5_listen: Option<String> = Some(String::from("127.0.0.1:1080"));
+    let mut socks5_user: Option<String> = None;
+    let mut socks5_pass: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--iface" || arg == "-i" {
@@ -26,6 +28,14 @@ async fn main() -> Result<()> {
             if let Some(val) = args.next() { socks5_listen = Some(val); }
         } else if let Some(val) = arg.strip_prefix("--socks5-listen=") {
             socks5_listen = Some(val.to_string());
+        } else if arg == "--socks5-user" {
+            if let Some(val) = args.next() { socks5_user = Some(val); }
+        } else if let Some(val) = arg.strip_prefix("--socks5-user=") {
+            socks5_user = Some(val.to_string());
+        } else if arg == "--socks5-pass" {
+            if let Some(val) = args.next() { socks5_pass = Some(val); }
+        } else if let Some(val) = arg.strip_prefix("--socks5-pass=") {
+            socks5_pass = Some(val.to_string());
         }
     }
 
@@ -35,7 +45,9 @@ async fn main() -> Result<()> {
 
     if let Some(s5_addr) = socks5_listen {
         let s5_iface = iface.clone();
-        tokio::spawn(async move { let _ = proxy::run_socks5_proxy(&s5_iface, &s5_addr).await; });
+        let s5_user_cloned = socks5_user.clone();
+        let s5_pass_cloned = socks5_pass.clone();
+        tokio::spawn(async move { let _ = proxy::run_socks5_proxy_auth(&s5_iface, &s5_addr, s5_user_cloned.as_deref(), s5_pass_cloned.as_deref()).await; });
     }
 
     let _ = http_task.await;
