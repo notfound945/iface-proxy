@@ -95,6 +95,13 @@ curl --socks5-hostname 127.0.0.1:1080 -I https://example.com -v
 curl --proxy-user user:pass --socks5-hostname 127.0.0.1:1080 -I https://example.com -v
 ```
 
+### 禁用 SOCKS5
+```bash
+./target/release/iface-proxy --iface en0 --no-socks5
+# 或 Makefile
+make run IFACE=en0 NO_SOCKS5=1
+```
+
 ### 通过环境变量（适用于多数 CLI）
 ```bash
 export http_proxy=http://127.0.0.1:7890
