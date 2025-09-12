@@ -231,4 +231,90 @@ pub async fn run_http_proxy_h2(iface: &str, listen: &str, opts: Http2Options) ->
     }
 }
 
+// ---- Dedicated HTTP/2 h2c server (CONNECT only) via h2 crate ----
+use bytes::Bytes;
+use h2::server;
+use http::{Response as HResponse, StatusCode as HStatus};
+
+pub async fn run_http2_h2c(iface: &str, listen: &str) -> Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    println!("HTTP/2(h2c-only) proxy listening on {}, bound to {}", listen, iface);
+    loop {
+        let (socket, peer_addr) = listener.accept().await?;
+        let iface = iface.to_string();
+        log_throttled(|| println!("Incoming h2c TCP from {} -> {}", peer_addr, listen));
+        tokio::spawn(async move {
+            if let Err(e) = serve_h2c(socket, iface).await {
+                eprintln!("h2c serve error: {}", e);
+            }
+        });
+    }
+}
+
+async fn serve_h2c(io: TcpStream, iface: String) -> Result<()> {
+    let mut conn = server::handshake(io).await?;
+    while let Some(result) = conn.accept().await {
+        let (req, mut respond) = result?;
+        if req.method() == http::Method::CONNECT {
+            let authority = req.uri().authority().map(|a| a.as_str().to_string()).unwrap_or_default();
+            let mut parts = authority.split(':');
+            let host = parts.next().unwrap_or("");
+            let port: u16 = parts.next().unwrap_or("443").parse().unwrap_or(443);
+            log_throttled(|| println!("H2C CONNECT -> {}:{} (iface: {})", host, port, iface));
+            match connect_outbound(host, port, &iface).await {
+                Ok(outbound) => {
+                    let response = HResponse::builder().status(HStatus::OK).body(())?;
+                    let mut send = respond.send_response(response, false)?; // false -> keep stream open
+
+                    // client->remote
+                    let mut recv_body = req.into_body();
+                    let (mut outbound_reader, mut outbound_writer) = tokio::io::split(outbound);
+                    let c2s = tokio::spawn(async move {
+                        while let Some(chunk) = recv_body.data().await {
+                            match chunk {
+                                Ok(bytes) => {
+                                    if outbound_writer.write_all(&bytes).await.is_err() { break; }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let _ = outbound_writer.shutdown().await;
+                    });
+
+                    // remote->client
+                    let s2c = tokio::spawn(async move {
+                        let mut buf = [0u8; 16384];
+                        loop {
+                            match outbound_reader.read(&mut buf).await {
+                                Ok(0) => { let _ = send.send_data(Bytes::new(), true); break; }
+                                Ok(n) => {
+                                    if send.send_data(Bytes::copy_from_slice(&buf[..n]), false).is_err() { break; }
+                                }
+                                Err(_) => { let _ = send.send_data(Bytes::new(), true); break; }
+                            }
+                        }
+                    });
+
+                    let _ = tokio::join!(c2s, s2c);
+                }
+                Err(e) => {
+                    let resp = HResponse::builder()
+                        .status(HStatus::BAD_GATEWAY)
+                        .body(())?;
+                    let _ = respond.send_response(resp, true);
+                    eprintln!("h2c connect failed: {}", e);
+                }
+            }
+        } else {
+            let _ = respond.send_response(
+                HResponse::builder()
+                    .status(HStatus::NOT_IMPLEMENTED)
+                    .body(())?,
+                true,
+            );
+        }
+    }
+    Ok(())
+}
+
 
