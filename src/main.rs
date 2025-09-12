@@ -230,13 +230,13 @@ async fn main() -> Result<()> {
     }
 
     // TCP（HTTP/HTTPS 代理）
-    let listener = TcpListener::bind("127.0.0.1:7891").await?;
-    println!("HTTP proxy listening on 127.0.0.1:7891, bound to {}", iface);
+    let listener = TcpListener::bind("127.0.0.1:7890").await?;
+    println!("HTTP proxy listening on 127.0.0.1:7890, bound to {}", iface);
 
     loop {
         let (inbound, peer_addr) = listener.accept().await?;
         log_throttled(|| println!(
-            "Incoming TCP connection from {} -> listening on 127.0.0.1:7891 (iface: {})",
+            "Incoming TCP connection from {} -> listening on 127.0.0.1:7890 (iface: {})",
             peer_addr, iface
         ));
         let iface_for_task = iface.clone();
