@@ -3,7 +3,7 @@ use std::ffi::CString;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 
 #[cfg(target_os = "macos")]
@@ -86,34 +86,71 @@ async fn handle_socks5(mut inbound: TcpStream, iface: &str) -> Result<()> {
     let cmd = buf[1];
     let atyp = buf[3];
 
-    let addr = match atyp {
+    // 生成用于日志的地址字符串，以及待连接的 IPv4 地址列表
+    let (addr_display, mut target_v4_list): (String, Vec<std::net::SocketAddrV4>) = match atyp {
         0x01 => {
             let ip = std::net::Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
             let port = u16::from_be_bytes([buf[8], buf[9]]);
-            format!("{}:{}", ip, port)
+            (format!("{}:{}", ip, port), vec![std::net::SocketAddrV4::new(ip, port)])
         }
         0x03 => {
             let len = buf[4] as usize;
             let host = String::from_utf8_lossy(&buf[5..5+len]).to_string();
             let port = u16::from_be_bytes([buf[5+len], buf[6+len]]);
-            format!("{}:{}", host, port)
+            let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
+            let v4_only: Vec<std::net::SocketAddrV4> = addrs
+                .filter_map(|sa| match sa {
+                    std::net::SocketAddr::V4(v4) => Some(v4),
+                    _ => None,
+                })
+                .collect();
+            (format!("{}:{}", host, port), v4_only)
         }
         _ => anyhow::bail!("Unsupported ATYP"),
     };
 
     if cmd == 0x01 {
-        log_throttled(|| println!("SOCKS5 CONNECT request -> {} (iface: {})", addr, iface));
-        // TCP CONNECT
-        let mut outbound = TcpStream::connect(&addr).await?;
-        let fd = outbound.as_raw_fd();
-        bind_iface(fd, iface)?;
+        log_throttled(|| println!("SOCKS5 CONNECT request -> {} (iface: {})", addr_display, iface));
+        // TCP CONNECT（在 connect 前绑定网卡；仅尝试 IPv4 地址，避免 macOS os error 49）
+        if target_v4_list.is_empty() {
+            anyhow::bail!("No IPv4 address to connect for target");
+        }
+
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut outbound_opt: Option<TcpStream> = None;
+        for v4 in target_v4_list.drain(..) {
+            let socket = TcpSocket::new_v4()?;
+            let fd = socket.as_raw_fd();
+            if let Err(e) = bind_iface(fd, iface) {
+                last_err = Some(e);
+                continue;
+            }
+            match socket.connect(std::net::SocketAddr::V4(v4)).await {
+                Ok(stream) => {
+                    outbound_opt = Some(stream);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(anyhow::Error::new(e));
+                    continue;
+                }
+            }
+        }
+
+        let mut outbound = match outbound_opt {
+            Some(s) => s,
+            None => {
+                if let Some(e) = last_err { return Err(e); }
+                else { anyhow::bail!("connect failed: unknown error"); }
+            }
+        };
 
         inbound.write_all(&[0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
-        log_throttled(|| println!("TCP CONNECT established -> {} (iface: {})", addr, iface));
+        log_throttled(|| println!("TCP CONNECT established -> {} (iface: {})", addr_display, iface));
         let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
         log_throttled(|| println!(
             "TCP CONNECT finished -> {} (c->s: {} bytes, s->c: {} bytes)",
-            addr, c2s, s2c
+            addr_display, c2s, s2c
         ));
     } else if cmd == 0x03 {
         anyhow::bail!("UDP ASSOC not supported here (use udp server)");
