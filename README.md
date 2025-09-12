@@ -2,7 +2,7 @@
 
 一个支持 http_proxy/https_proxy 与 socks5 的本地代理，默认监听 `127.0.0.1:7890`（HTTP）与可选的 `--socks5-listen`（SOCKS5），将请求/隧道转发到目标站点；外发连接可绑定到指定网卡，便于控制出站接口。
 
-- **协议**: HTTP 代理（普通 HTTP 转发 + HTTPS 的 CONNECT 隧道）、SOCKS5（支持无认证与用户名/密码认证）
+- **协议**: HTTP 代理（HTTP/1.x 默认 + 可选 HTTP/2/h2c；HTTPS 的 CONNECT 隧道）、SOCKS5（支持无认证与用户名/密码认证）
 - **监听**: HTTP 通过 `--listen` 指定（默认 127.0.0.1:7891 或你的传参）；SOCKS5 默认启用在 `127.0.0.1:1080`（可用 `--socks5-listen` 覆盖）
 
 ### 默认参数与启用示例
@@ -74,6 +74,16 @@ curl -x http://127.0.0.1:7890 -I http://example.com -v --connect-timeout 5 --max
 curl -x http://127.0.0.1:7890 -I https://example.com -v --connect-timeout 5 --max-time 10
 ```
 
+### 启用 HTTP/2（默认已启用 h2c；如需 TLS+ALPN）
+```bash
+# h2c（明文），默认已启用
+./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890
+
+# h2（TLS+ALPN），需提供证书与私钥（PEM）
+./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890 \
+  --tls-cert cert.pem --tls-key key.pem
+```
+
 ### curl 测试（SOCKS5）
 ```bash
 # 无认证
@@ -107,8 +117,8 @@ curl -I https://example.com -v
 ```bash
 make build           # 调试构建
 make release         # 发布构建
-make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass
-make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass
+make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass TLS_CERT=cert.pem TLS_KEY=key.pem
+make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass TLS_CERT=cert.pem TLS_KEY=key.pem
 make strip           # 去符号减小体积（macOS）
 make linux-musl      # 构建 Linux musl 静态二进制
 ```
