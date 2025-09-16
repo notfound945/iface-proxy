@@ -7,10 +7,4 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 nix = "0.29"
 anyhow = "1.0"
-bytes = "1.6"
-hyper = { version = "0.14", features = ["server", "http1", "http2", "client", "runtime"] }
-http = "0.2"
-h2 = "0.3"
-tokio-rustls = "0.24"
-rustls = "0.21"
-rustls-pemfile = "1.0"
+ 

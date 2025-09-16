@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::util::{connect_outbound, log_throttled};
+use crate::util::{connect_outbound, log_throttled, current_timestamp_prefix};
 
 async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
@@ -51,11 +51,11 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
         let mut hp = uri.split(':');
         let host = hp.next().unwrap_or("");
         let port: u16 = hp.next().unwrap_or("443").parse().unwrap_or(443);
-        log_throttled(|| println!("HTTP CONNECT -> {}:{} (iface: {})", host, port, iface));
+        log_throttled(|| println!("{} HTTP CONNECT -> {}:{} (iface: {})", current_timestamp_prefix(), host, port, iface));
         let mut outbound = connect_outbound(host, port, iface).await?;
         inbound.write_all(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: iface-proxy\r\n\r\n").await?;
         let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-        log_throttled(|| println!("HTTP CONNECT finished {}:{} (c->s: {} bytes, s->c: {} bytes)", host, port, c2s, s2c));
+        log_throttled(|| println!("{} HTTP CONNECT finished {}:{} (c->s: {} bytes, s->c: {} bytes)", current_timestamp_prefix(), host, port, c2s, s2c));
         return Ok(());
     }
 
@@ -68,7 +68,7 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
     };
     if let Some((h, p)) = host.clone().split_once(':') { host = h.to_string(); port = p.parse().unwrap_or(80); }
 
-    log_throttled(|| println!("HTTP {} {} -> {}:{} (iface: {})", method, path, host, port, iface));
+    log_throttled(|| println!("{} HTTP {} {} -> {}:{} (iface: {})", current_timestamp_prefix(), method, path, host, port, iface));
     let mut outbound = connect_outbound(&host, port, iface).await?;
 
     let mut lines = headers_str.split("\r\n");
@@ -90,82 +90,24 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
     outbound.write_all(rebuilt.as_bytes()).await?;
     if !body_start.is_empty() { inbound.write_all(body_start).await?; }
     let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-    log_throttled(|| println!("HTTP finished {} {} (c->s: {} bytes, s->c: {} bytes)", method, host, c2s, s2c));
+    log_throttled(|| println!("{} HTTP finished {} {} (c->s: {} bytes, s->c: {} bytes)", current_timestamp_prefix(), method, host, c2s, s2c));
     Ok(())
 }
 
 pub async fn run_http_proxy(iface: &str, listen: &str) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
-    println!("HTTP proxy listening on {}, bound to {}", listen, iface);
+    println!("{} HTTP proxy listening on {}, bound to {}", current_timestamp_prefix(), listen, iface);
     loop {
         let (inbound, peer_addr) = listener.accept().await?;
         let listen_for_log = listen.to_string();
         log_throttled(|| println!(
-            "Incoming TCP connection from {} -> listening on {} (iface: {})",
-            peer_addr, listen_for_log, iface
+            "{} Incoming TCP connection from {} -> listening on {} (iface: {})",
+            current_timestamp_prefix(), peer_addr, listen_for_log, iface
         ));
         let iface_for_task = iface.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_http_proxy(inbound, &iface_for_task).await {
-                eprintln!("TCP handler error: {}", e);
-            }
-        });
-    }
-}
-// ---- HTTP/1.1 Upgrade: h2c + HTTP/2 CONNECT via hyper (dedicated port) ----
-use hyper::{Body, Request, Response, StatusCode};
-use hyper::service::service_fn;
-use hyper::server::conn::Http;
-
-pub async fn run_http2_upgrade(iface: &str, listen: &str) -> Result<()> {
-    let listener = TcpListener::bind(listen).await?;
-    println!("HTTP/2 (h2c Upgrade) proxy listening on {}, bound to {}", listen, iface);
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        let iface_string = iface.to_string();
-        log_throttled(|| println!("Incoming TCP connection from {} -> {}", peer_addr, listen));
-        tokio::spawn(async move {
-            let service = service_fn(move |req: Request<Body>| {
-                let iface = iface_string.clone();
-                async move {
-                    if req.method() == hyper::Method::CONNECT {
-                        // CONNECT host:port
-                        let authority = req.uri().authority().map(|a| a.as_str().to_string()).unwrap_or_default();
-                        let mut parts = authority.split(':');
-                        let host = parts.next().unwrap_or("");
-                        let port: u16 = parts.next().unwrap_or("443").parse().unwrap_or(443);
-                        log_throttled(|| println!("H2(Upgrade) CONNECT -> {}:{} (iface: {})", host, port, iface));
-                        match connect_outbound(host, port, &iface).await {
-                            Ok(mut outbound) => {
-                                let mut resp = Response::new(Body::empty());
-                                *resp.status_mut() = StatusCode::OK;
-                                // After response is sent, get upgraded IO (works for H1 upgrade and H2 CONNECT)
-                                tokio::spawn(async move {
-                                    match hyper::upgrade::on(req).await {
-                                        Ok(mut upgraded) => {
-                                            let _ = tokio::io::copy_bidirectional(&mut upgraded, &mut outbound).await;
-                                        }
-                                        Err(e) => eprintln!("upgrade error: {}", e),
-                                    }
-                                });
-                                Ok::<_, anyhow::Error>(resp)
-                            }
-                            Err(e) => {
-                                let mut resp = Response::new(Body::from(format!("connect failed: {}", e)));
-                                *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                                Ok(resp)
-                            }
-                        }
-                    } else {
-                        let mut resp = Response::new(Body::from("Only CONNECT supported on this port"));
-                        *resp.status_mut() = StatusCode::NOT_IMPLEMENTED;
-                        Ok(resp)
-                    }
-                }
-            });
-
-            if let Err(e) = Http::new().http2_only(false).serve_connection(stream, service).await {
-                eprintln!("hyper serve error: {}", e);
+                eprintln!("{} TCP handler error: {}", current_timestamp_prefix(), e);
             }
         });
     }

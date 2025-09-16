@@ -2,26 +2,26 @@
 
 一个支持 http_proxy/https_proxy 与 socks5 的本地代理，默认监听 `127.0.0.1:7890`（HTTP）与可选的 `--socks5-listen`（SOCKS5），将请求/隧道转发到目标站点；外发连接可绑定到指定网卡，便于控制出站接口。
 
-- **协议**: HTTP 代理（HTTP/1.x 默认 + 可选 HTTP/2/h2c；HTTPS 的 CONNECT 隧道）、SOCKS5（支持无认证与用户名/密码认证）
-- **监听**: HTTP 通过 `--listen` 指定（默认 127.0.0.1:7891 或你的传参）；SOCKS5 默认启用在 `127.0.0.1:1080`（可用 `--socks5-listen` 覆盖）
+- **协议**: HTTP 代理（仅 HTTP/1.x；HTTPS 的 CONNECT 隧道）、SOCKS5（支持无认证与用户名/密码认证）
+- **监听**: HTTP 通过 `--listen` 指定（默认 127.0.0.1:7890 或你的传参）；SOCKS5 默认启用在 `127.0.0.1:7080`（可用 `--socks5-listen` 覆盖）
 
 ### 默认参数与启用示例
 
-- **HTTP 默认监听**: `127.0.0.1:7891`（或按 `--listen` 覆盖）
-- **SOCKS5 默认监听**: `127.0.0.1:1080`（可按 `--socks5-listen` 覆盖）
+- **HTTP 默认监听**: `127.0.0.1:7890`（或按 `--listen` 覆盖）
+- **SOCKS5 默认监听**: `127.0.0.1:7080`（可按 `--socks5-listen` 覆盖）
 
 ```bash
 # 默认同时启用 HTTP 与 SOCKS5
-./target/release/iface-socks5 --iface en0
+./target/release/iface-proxy --iface en0
 
 # 自定义 HTTP 监听
-./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:8080
+./target/release/iface-proxy --iface en0 --listen 127.0.0.1:8080
 
 # 自定义 SOCKS5 监听
-./target/release/iface-socks5 --iface en0 --socks5-listen 127.0.0.1:1081
+./target/release/iface-proxy --iface en0 --socks5-listen 127.0.0.1:1081
 
 # 启用 SOCKS5（用户名/密码）
-./target/release/iface-socks5 --iface en0 --socks5-listen 127.0.0.1:1080 \
+./target/release/iface-proxy --iface en0 --socks5-listen 127.0.0.1:7080 \
   --socks5-user user --socks5-pass pass
 ```
 - **出站绑定**: 通过 `--iface` 指定网卡（macOS 使用 IP_BOUND_IF，Linux 使用 SO_BINDTODEVICE）
@@ -36,7 +36,7 @@
 ### 编译
 ```bash
 cargo build --release
-# 产物：./target/release/iface-socks5
+# 产物：./target/release/iface-proxy
 ```
 
 或使用 Makefile：
@@ -48,7 +48,7 @@ make run-release IFACE=en0
 
 ### 运行
 ```bash
-./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890
+./target/release/iface-proxy --iface en0 --listen 127.0.0.1:7890
 # 日志示例：
 # HTTP proxy listening on 127.0.0.1:7890, bound to en0
 ```
@@ -74,25 +74,14 @@ curl -x http://127.0.0.1:7890 -I http://example.com -v --connect-timeout 5 --max
 curl -x http://127.0.0.1:7890 -I https://example.com -v --connect-timeout 5 --max-time 10
 ```
 
-### 启用 HTTP/2（默认已启用 h2c；如需 TLS+ALPN）
-```bash
-# h2c（明文），默认已启用
-./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890
 
-# h2（TLS+ALPN），需提供证书与私钥（PEM）
-./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890 \
-  --tls-cert cert.pem --tls-key key.pem
-
-# 显式关闭 HTTP/2（强制仅 HTTP/1.x）
-./target/release/iface-socks5 --iface en0 --listen 127.0.0.1:7890 --no-http2
-```
 
 ### curl 测试（SOCKS5）
 ```bash
 # 无认证
-curl --socks5-hostname 127.0.0.1:1080 -I https://example.com -v
+curl --socks5-hostname 127.0.0.1:7080 -I https://example.com -v
 # 用户名/密码
-curl --proxy-user user:pass --socks5-hostname 127.0.0.1:1080 -I https://example.com -v
+curl --proxy-user user:pass --socks5-hostname 127.0.0.1:7080 -I https://example.com -v
 ```
 
 ### 禁用 SOCKS5
@@ -127,11 +116,8 @@ curl -I https://example.com -v
 ```bash
 make build           # 调试构建
 make release         # 发布构建
-make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass TLS_CERT=cert.pem TLS_KEY=key.pem
-make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:1080 USER=user PASS=pass TLS_CERT=cert.pem TLS_KEY=key.pem
-
-# 仅 HTTP/1.x（禁用 HTTP/2）
-make run IFACE=en0 NO_HTTP2=1
+make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7080 USER=user PASS=pass
+make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7080 USER=user PASS=pass
 make strip           # 去符号减小体积（macOS）
 make linux-musl      # 构建 Linux musl 静态二进制
 ```

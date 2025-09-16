@@ -97,7 +97,7 @@ where
         {
             let suppressed = LOG_SUPPRESSED.swap(0, Ordering::SeqCst);
             if suppressed > 0 {
-                println!("[log] suppressed {} messages in last 1s", suppressed);
+                println!("{} [log] suppressed {} messages in last 1s", current_timestamp_prefix(), suppressed);
             }
             LOG_COUNT.store(0, Ordering::SeqCst);
         }
@@ -108,6 +108,22 @@ where
     } else {
         LOG_SUPPRESSED.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+pub(crate) fn current_timestamp_prefix() -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let millis = now.subsec_millis();
+    let t: nix::libc::time_t = secs as nix::libc::time_t;
+    let mut tm: nix::libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { let _ = nix::libc::localtime_r(&t, &mut tm); }
+    let year = tm.tm_year + 1900;
+    let month = tm.tm_mon + 1;
+    let day = tm.tm_mday;
+    let hour = tm.tm_hour;
+    let min = tm.tm_min;
+    let sec = tm.tm_sec;
+    format!("[{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}.{millis:03}]")
 }
 
 pub(crate) async fn connect_outbound(host: &str, port: u16, iface: &str) -> Result<TcpStream> {
