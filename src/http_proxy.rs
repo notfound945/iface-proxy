@@ -4,17 +4,6 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::util::{connect_outbound, log_throttled};
 
-// ---- Optional HTTP/2/h2c (CONNECT-only) via hyper ----
-use hyper::{Body, Request, Response, StatusCode};
-use hyper::service::service_fn;
-use hyper::server::conn::Http;
-use std::sync::Arc;
-use tokio_rustls::rustls::{self, ServerConfig};
-use tokio_rustls::TlsAcceptor;
-use tokio::io::{AsyncRead, AsyncWrite};
-use std::fs::File;
-use std::io::BufReader;
-
 async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 1024];
@@ -123,198 +112,61 @@ pub async fn run_http_proxy(iface: &str, listen: &str) -> Result<()> {
         });
     }
 }
+// ---- HTTP/1.1 Upgrade: h2c + HTTP/2 CONNECT via hyper (dedicated port) ----
+use hyper::{Body, Request, Response, StatusCode};
+use hyper::service::service_fn;
+use hyper::server::conn::Http;
 
-#[derive(Clone, Default)]
-pub struct Http2Options {
-    pub tls_cert: Option<String>,
-    pub tls_key: Option<String>,
-}
-
-fn build_tls(config: &Http2Options) -> Result<Option<TlsAcceptor>> {
-    if let (Some(cert_path), Some(key_path)) = (config.tls_cert.as_ref(), config.tls_key.as_ref()) {
-        let certs = {
-            let mut rd = BufReader::new(File::open(cert_path)?);
-            rustls_pemfile::certs(&mut rd)?.into_iter().map(rustls::Certificate).collect::<Vec<_>>()
-        };
-        let key = {
-            let mut rd = BufReader::new(File::open(key_path)?);
-            let keys = rustls_pemfile::pkcs8_private_keys(&mut rd)?;
-            if keys.is_empty() { anyhow::bail!("no pkcs8 key found"); }
-            rustls::PrivateKey(keys[0].clone())
-        };
-        let mut cfg = ServerConfig::builder()
-            .with_safe_defaults()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Ok(Some(TlsAcceptor::from(Arc::new(cfg))))
-    } else {
-        Ok(None)
-    }
-}
-
-async fn serve_hyper<I>(io: I, iface: Arc<String>) -> Result<()>
-where
-    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let service = service_fn(move |req: Request<Body>| {
-        let iface = iface.clone();
-        async move {
-            if req.method() == hyper::Method::CONNECT {
-                // CONNECT host:port
-                let authority = req.uri().authority().map(|a| a.as_str().to_string()).unwrap_or_default();
-                let mut parts = authority.split(':');
-                let host = parts.next().unwrap_or("");
-                let port: u16 = parts.next().unwrap_or("443").parse().unwrap_or(443);
-                log_throttled(|| println!("HTTP2 CONNECT -> {}:{} (iface: {})", host, port, iface));
-                let outbound_res = connect_outbound(host, port, &iface).await;
-                let mut resp = Response::new(Body::empty());
-                match outbound_res {
-                    Ok(mut outbound) => {
-                        *resp.status_mut() = StatusCode::OK;
-                        // Spawn upgrade tunnel
-                        tokio::spawn(async move {
-                            match hyper::upgrade::on(req).await {
-                                Ok(mut upgraded) => {
-                                    let _ = copy_bidirectional(&mut upgraded, &mut outbound).await;
-                                }
-                                Err(e) => eprintln!("upgrade error: {}", e),
+pub async fn run_http2_upgrade(iface: &str, listen: &str) -> Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    println!("HTTP/2 (h2c Upgrade) proxy listening on {}, bound to {}", listen, iface);
+    loop {
+        let (stream, peer_addr) = listener.accept().await?;
+        let iface_string = iface.to_string();
+        log_throttled(|| println!("Incoming TCP connection from {} -> {}", peer_addr, listen));
+        tokio::spawn(async move {
+            let service = service_fn(move |req: Request<Body>| {
+                let iface = iface_string.clone();
+                async move {
+                    if req.method() == hyper::Method::CONNECT {
+                        // CONNECT host:port
+                        let authority = req.uri().authority().map(|a| a.as_str().to_string()).unwrap_or_default();
+                        let mut parts = authority.split(':');
+                        let host = parts.next().unwrap_or("");
+                        let port: u16 = parts.next().unwrap_or("443").parse().unwrap_or(443);
+                        log_throttled(|| println!("H2(Upgrade) CONNECT -> {}:{} (iface: {})", host, port, iface));
+                        match connect_outbound(host, port, &iface).await {
+                            Ok(mut outbound) => {
+                                let mut resp = Response::new(Body::empty());
+                                *resp.status_mut() = StatusCode::OK;
+                                // After response is sent, get upgraded IO (works for H1 upgrade and H2 CONNECT)
+                                tokio::spawn(async move {
+                                    match hyper::upgrade::on(req).await {
+                                        Ok(mut upgraded) => {
+                                            let _ = tokio::io::copy_bidirectional(&mut upgraded, &mut outbound).await;
+                                        }
+                                        Err(e) => eprintln!("upgrade error: {}", e),
+                                    }
+                                });
+                                Ok::<_, anyhow::Error>(resp)
                             }
-                        });
-                        Ok::<_, anyhow::Error>(resp)
-                    }
-                    Err(e) => {
-                        *resp.status_mut() = StatusCode::BAD_GATEWAY;
-                        *resp.body_mut() = Body::from(format!("connect failed: {}", e));
+                            Err(e) => {
+                                let mut resp = Response::new(Body::from(format!("connect failed: {}", e)));
+                                *resp.status_mut() = StatusCode::BAD_GATEWAY;
+                                Ok(resp)
+                            }
+                        }
+                    } else {
+                        let mut resp = Response::new(Body::from("Only CONNECT supported on this port"));
+                        *resp.status_mut() = StatusCode::NOT_IMPLEMENTED;
                         Ok(resp)
                     }
                 }
-            } else {
-                // TODO: 可扩展为完整的 HTTP/2 正向代理，这里先返回 501
-                let mut resp = Response::new(Body::from("HTTP/2 proxy only supports CONNECT in this mode"));
-                *resp.status_mut() = StatusCode::NOT_IMPLEMENTED;
-                Ok(resp)
-            }
-        }
-    });
+            });
 
-    Http::new().http2_only(false).serve_connection(io, service).await?;
-    Ok(())
-}
-
-pub async fn run_http_proxy_h2(iface: &str, listen: &str, opts: Http2Options) -> Result<()> {
-    let listener = TcpListener::bind(listen).await?;
-    let tls = build_tls(&opts)?;
-    let iface_arc = Arc::new(iface.to_string());
-    if tls.is_some() {
-        println!("HTTP/2(TLS) proxy listening on {}, bound to {}", listen, iface);
-    } else {
-        println!("HTTP/2(h2c) proxy listening on {}, bound to {}", listen, iface);
-    }
-
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        let iface = iface_arc.clone();
-        let tls = tls.clone();
-        log_throttled(|| println!("Incoming TCP connection from {} -> {}", peer_addr, listen));
-        tokio::spawn(async move {
-            let res: Result<()> = if let Some(tls_acceptor) = tls {
-                match tls_acceptor.accept(stream).await {
-                    Ok(tls_stream) => serve_hyper(tls_stream, iface).await,
-                    Err(e) => { eprintln!("TLS accept error: {}", e); Ok(()) }
-                }
-            } else {
-                serve_hyper(stream, iface).await
-            };
-            if let Err(e) = res { eprintln!("hyper serve error: {}", e); }
-        });
-    }
-}
-
-// ---- Dedicated HTTP/2 h2c server (CONNECT only) via h2 crate ----
-use bytes::Bytes;
-use h2::server;
-use http::{Response as HResponse, StatusCode as HStatus};
-
-pub async fn run_http2_h2c(iface: &str, listen: &str) -> Result<()> {
-    let listener = TcpListener::bind(listen).await?;
-    println!("HTTP/2(h2c-only) proxy listening on {}, bound to {}", listen, iface);
-    loop {
-        let (socket, peer_addr) = listener.accept().await?;
-        let iface = iface.to_string();
-        log_throttled(|| println!("Incoming h2c TCP from {} -> {}", peer_addr, listen));
-        tokio::spawn(async move {
-            if let Err(e) = serve_h2c(socket, iface).await {
-                eprintln!("h2c serve error: {}", e);
+            if let Err(e) = Http::new().http2_only(false).serve_connection(stream, service).await {
+                eprintln!("hyper serve error: {}", e);
             }
         });
     }
 }
-
-async fn serve_h2c(io: TcpStream, iface: String) -> Result<()> {
-    let mut conn = server::handshake(io).await?;
-    while let Some(result) = conn.accept().await {
-        let (req, mut respond) = result?;
-        if req.method() == http::Method::CONNECT {
-            let authority = req.uri().authority().map(|a| a.as_str().to_string()).unwrap_or_default();
-            let mut parts = authority.split(':');
-            let host = parts.next().unwrap_or("");
-            let port: u16 = parts.next().unwrap_or("443").parse().unwrap_or(443);
-            log_throttled(|| println!("H2C CONNECT -> {}:{} (iface: {})", host, port, iface));
-            match connect_outbound(host, port, &iface).await {
-                Ok(outbound) => {
-                    let response = HResponse::builder().status(HStatus::OK).body(())?;
-                    let mut send = respond.send_response(response, false)?; // false -> keep stream open
-
-                    // client->remote
-                    let mut recv_body = req.into_body();
-                    let (mut outbound_reader, mut outbound_writer) = tokio::io::split(outbound);
-                    let c2s = tokio::spawn(async move {
-                        while let Some(chunk) = recv_body.data().await {
-                            match chunk {
-                                Ok(bytes) => {
-                                    if outbound_writer.write_all(&bytes).await.is_err() { break; }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                        let _ = outbound_writer.shutdown().await;
-                    });
-
-                    // remote->client
-                    let s2c = tokio::spawn(async move {
-                        let mut buf = [0u8; 16384];
-                        loop {
-                            match outbound_reader.read(&mut buf).await {
-                                Ok(0) => { let _ = send.send_data(Bytes::new(), true); break; }
-                                Ok(n) => {
-                                    if send.send_data(Bytes::copy_from_slice(&buf[..n]), false).is_err() { break; }
-                                }
-                                Err(_) => { let _ = send.send_data(Bytes::new(), true); break; }
-                            }
-                        }
-                    });
-
-                    let _ = tokio::join!(c2s, s2c);
-                }
-                Err(e) => {
-                    let resp = HResponse::builder()
-                        .status(HStatus::BAD_GATEWAY)
-                        .body(())?;
-                    let _ = respond.send_response(resp, true);
-                    eprintln!("h2c connect failed: {}", e);
-                }
-            }
-        } else {
-            let _ = respond.send_response(
-                HResponse::builder()
-                    .status(HStatus::NOT_IMPLEMENTED)
-                    .body(())?,
-                true,
-            );
-        }
-    }
-    Ok(())
-}
-
-
