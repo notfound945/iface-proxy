@@ -1,9 +1,9 @@
 ## 工具简介
 
-一个支持 http_proxy/https_proxy 与 socks5 的本地代理，默认监听 `127.0.0.1:7890`（HTTP）与可选的 `--socks5-listen`（SOCKS5），将请求/隧道转发到目标站点；外发连接可绑定到指定网卡，便于控制出站接口。
+一个支持 http_proxy/https_proxy 与 socks5 的本地代理，默认监听 `127.0.0.1:7890`（HTTP）。SOCKS5 默认关闭，可通过 `--socks5` 启用，并可用 `--socks5-listen` 指定监听地址；外发连接可绑定到指定网卡，便于控制出站接口。
 
 - **协议**: HTTP 代理（仅 HTTP/1.x；HTTPS 的 CONNECT 隧道）、SOCKS5（支持无认证与用户名/密码认证）
-- **监听**: HTTP 通过 `--listen` 指定（默认 127.0.0.1:7890 或你的传参）；SOCKS5 默认启用在 `127.0.0.1:7080`（可用 `--socks5-listen` 覆盖）
+- **监听**: HTTP 通过 `--listen` 指定（默认 127.0.0.1:7890 或你的传参）；SOCKS5 通过 `--socks5` 启用，默认 `127.0.0.1:7080`（可用 `--socks5-listen` 覆盖）
 
 ### 默认参数与启用示例
 
@@ -11,17 +11,20 @@
 - **SOCKS5 默认监听**: `127.0.0.1:7080`（可按 `--socks5-listen` 覆盖）
 
 ```bash
-# 默认同时启用 HTTP 与 SOCKS5
+# 默认仅启用 HTTP
 ./target/release/iface-proxy --iface en0
 
 # 自定义 HTTP 监听
 ./target/release/iface-proxy --iface en0 --listen 127.0.0.1:8080
 
+# 启用 SOCKS5（默认 127.0.0.1:7080）
+./target/release/iface-proxy --iface en0 --socks5
+
 # 自定义 SOCKS5 监听
-./target/release/iface-proxy --iface en0 --socks5-listen 127.0.0.1:1081
+./target/release/iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:7081
 
 # 启用 SOCKS5（用户名/密码）
-./target/release/iface-proxy --iface en0 --socks5-listen 127.0.0.1:7080 \
+./target/release/iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:7080 \
   --socks5-user user --socks5-pass pass
 ```
 - **出站绑定**: 通过 `--iface` 指定网卡（macOS 使用 IP_BOUND_IF，Linux 使用 SO_BINDTODEVICE）
@@ -85,11 +88,7 @@ curl --proxy-user user:pass --socks5-hostname 127.0.0.1:7080 -I https://example.
 ```
 
 ### 禁用 SOCKS5
-```bash
-./target/release/iface-proxy --iface en0 --no-socks5
-# 或 Makefile
-make run IFACE=en0 NO_SOCKS5=1
-```
+不传 `--socks5` 即默认禁用。
 
 ### 通过环境变量（适用于多数 CLI）
 ```bash
@@ -116,8 +115,9 @@ curl -I https://example.com -v
 ```bash
 make build           # 调试构建
 make release         # 发布构建
-make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7080 USER=user PASS=pass
-make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7080 USER=user PASS=pass
+make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=1 USER=user PASS=pass
+make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7081 USER=user PASS=pass
+make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=1 USER=user PASS=pass
 make strip           # 去符号减小体积（macOS）
 make linux-musl      # 构建 Linux musl 静态二进制
 ```
