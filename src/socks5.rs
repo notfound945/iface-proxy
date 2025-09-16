@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::util::{connect_outbound, log_throttled, current_timestamp_prefix};
+use crate::util::{connect_outbound, log_throttled, log_info, log_error};
 
 async fn read_exact_into(stream: &mut TcpStream, buf: &mut [u8]) -> Result<()> {
     stream.read_exact(buf).await?; Ok(())
@@ -45,11 +45,11 @@ async fn handle_socks5(mut inbound: TcpStream, iface: &str, user: Option<&str>, 
 
     match cmd {
         0x01 => {
-            log_throttled(|| println!("{} SOCKS5 CONNECT -> {}:{} (iface: {})", current_timestamp_prefix(), target_host, target_port, iface));
+            log_throttled(|| log_info(format!("SOCKS5 CONNECT -> {}:{} (iface: {})", target_host, target_port, iface)));
             let mut outbound = connect_outbound(&target_host, target_port, iface).await?;
             inbound.write_all(&[0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]).await?;
             let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-            log_throttled(|| println!("{} SOCKS5 finished {}:{} (c->s: {} bytes, s->c: {} bytes)", current_timestamp_prefix(), target_host, target_port, c2s, s2c));
+            log_throttled(|| log_info(format!("SOCKS5 finished {}:{} (c->s: {} bytes, s->c: {} bytes)", target_host, target_port, c2s, s2c)));
             Ok(())
         }
         0x03 => { anyhow::bail!("UDP ASSOC not supported") }
@@ -59,17 +59,17 @@ async fn handle_socks5(mut inbound: TcpStream, iface: &str, user: Option<&str>, 
 
 pub async fn run_socks5_proxy_auth(iface: &str, listen: &str, user: Option<&str>, pass: Option<&str>) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
-    println!("{} SOCKS5 proxy listening on {}, bound to {}", current_timestamp_prefix(), listen, iface);
+    log_info(format!("SOCKS5 proxy listening on {}, bound to {}", listen, iface));
     loop {
         let (inbound, peer_addr) = listener.accept().await?;
         let listen_for_log = listen.to_string();
-        log_throttled(|| println!("{} Incoming TCP connection from {} -> listening on {} (iface: {})", current_timestamp_prefix(), peer_addr, listen_for_log, iface));
+        log_throttled(|| log_info(format!("Incoming TCP connection from {} -> listening on {} (iface: {})", peer_addr, listen_for_log, iface)));
         let iface_for_task = iface.to_string();
         let u = user.map(|s| s.to_string());
         let p = pass.map(|s| s.to_string());
         tokio::spawn(async move {
             if let Err(e) = handle_socks5(inbound, &iface_for_task, u.as_deref(), p.as_deref()).await {
-                eprintln!("{} SOCKS5 handler error: {}", current_timestamp_prefix(), e);
+                log_error(format!("SOCKS5 handler error: {}", e));
             }
         });
     }

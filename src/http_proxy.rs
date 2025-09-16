@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::util::{connect_outbound, log_throttled, current_timestamp_prefix};
+use crate::util::{connect_outbound, log_throttled, log_info, log_error};
 
 async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
@@ -51,11 +51,11 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
         let mut hp = uri.split(':');
         let host = hp.next().unwrap_or("");
         let port: u16 = hp.next().unwrap_or("443").parse().unwrap_or(443);
-        log_throttled(|| println!("{} HTTP CONNECT -> {}:{} (iface: {})", current_timestamp_prefix(), host, port, iface));
+        log_throttled(|| log_info(format!("HTTP CONNECT -> {}:{} (iface: {})", host, port, iface)));
         let mut outbound = connect_outbound(host, port, iface).await?;
         inbound.write_all(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: iface-proxy\r\n\r\n").await?;
         let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-        log_throttled(|| println!("{} HTTP CONNECT finished {}:{} (c->s: {} bytes, s->c: {} bytes)", current_timestamp_prefix(), host, port, c2s, s2c));
+        log_throttled(|| log_info(format!("HTTP CONNECT finished {}:{} (c->s: {} bytes, s->c: {} bytes)", host, port, c2s, s2c)));
         return Ok(());
     }
 
@@ -68,7 +68,7 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
     };
     if let Some((h, p)) = host.clone().split_once(':') { host = h.to_string(); port = p.parse().unwrap_or(80); }
 
-    log_throttled(|| println!("{} HTTP {} {} -> {}:{} (iface: {})", current_timestamp_prefix(), method, path, host, port, iface));
+    log_throttled(|| log_info(format!("HTTP {} {} -> {}:{} (iface: {})", method, path, host, port, iface)));
     let mut outbound = connect_outbound(&host, port, iface).await?;
 
     let mut lines = headers_str.split("\r\n");
@@ -90,24 +90,24 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
     outbound.write_all(rebuilt.as_bytes()).await?;
     if !body_start.is_empty() { inbound.write_all(body_start).await?; }
     let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
-    log_throttled(|| println!("{} HTTP finished {} {} (c->s: {} bytes, s->c: {} bytes)", current_timestamp_prefix(), method, host, c2s, s2c));
+    log_throttled(|| log_info(format!("HTTP finished {} {} (c->s: {} bytes, s->c: {} bytes)", method, host, c2s, s2c)));
     Ok(())
 }
 
 pub async fn run_http_proxy(iface: &str, listen: &str) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
-    println!("{} HTTP proxy listening on {}, bound to {}", current_timestamp_prefix(), listen, iface);
+    log_info(format!("HTTP proxy listening on {}, bound to {}", listen, iface));
     loop {
         let (inbound, peer_addr) = listener.accept().await?;
         let listen_for_log = listen.to_string();
-        log_throttled(|| println!(
-            "{} Incoming TCP connection from {} -> listening on {} (iface: {})",
-            current_timestamp_prefix(), peer_addr, listen_for_log, iface
-        ));
+        log_throttled(|| log_info(format!(
+            "Incoming TCP connection from {} -> listening on {} (iface: {})",
+            peer_addr, listen_for_log, iface
+        )));
         let iface_for_task = iface.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_http_proxy(inbound, &iface_for_task).await {
-                eprintln!("{} TCP handler error: {}", current_timestamp_prefix(), e);
+                log_error(format!("TCP handler error: {}", e));
             }
         });
     }

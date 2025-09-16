@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     // 主端口固定 HTTP/1.x 代理
     let http_task = tokio::spawn(async move {
         if let Err(e) = http_proxy::run_http_proxy(&http_iface, &http_listen).await {
-            eprintln!("{} HTTP proxy fatal error: {}", crate::util::current_timestamp_prefix(), e);
+            crate::util::log_error(format!("HTTP proxy fatal error: {}", e));
         }
     });
 
@@ -61,14 +61,14 @@ async fn main() -> Result<()> {
             let s5_pass_cloned = socks5_pass.clone();
             tokio::spawn(async move {
                 if let Err(e) = socks5::run_socks5_proxy_auth(&s5_iface, &s5_addr, s5_user_cloned.as_deref(), s5_pass_cloned.as_deref()).await {
-                    eprintln!("{} SOCKS5 proxy fatal error: {}", crate::util::current_timestamp_prefix(), e);
+                    crate::util::log_error(format!("SOCKS5 proxy fatal error: {}", e));
                 }
             });
         }
     }
 
     if let Err(e) = http_task.await {
-        eprintln!("{} HTTP proxy task panicked: {}", crate::util::current_timestamp_prefix(), e);
+        crate::util::log_error(format!("HTTP proxy task panicked: {}", e));
     }
     Ok(())
 }

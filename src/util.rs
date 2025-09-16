@@ -97,7 +97,7 @@ where
         {
             let suppressed = LOG_SUPPRESSED.swap(0, Ordering::SeqCst);
             if suppressed > 0 {
-                println!("{} [log] suppressed {} messages in last 1s", current_timestamp_prefix(), suppressed);
+                log_log(format!("suppressed {} messages in last 1s", suppressed));
             }
             LOG_COUNT.store(0, Ordering::SeqCst);
         }
@@ -124,6 +124,30 @@ pub(crate) fn current_timestamp_prefix() -> String {
     let min = tm.tm_min;
     let sec = tm.tm_sec;
     format!("[{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}.{millis:03}]")
+}
+
+pub(crate) fn log_info(message: impl AsRef<str>) {
+    println!(
+        "{} \x1b[32mINFO\x1b[0m {}",
+        current_timestamp_prefix(),
+        message.as_ref()
+    );
+}
+
+pub(crate) fn log_log(message: impl AsRef<str>) {
+    println!(
+        "{} \x1b[36mLOG\x1b[0m {}",
+        current_timestamp_prefix(),
+        message.as_ref()
+    );
+}
+
+pub(crate) fn log_error(message: impl AsRef<str>) {
+    eprintln!(
+        "{} \x1b[31mERROR\x1b[0m {}",
+        current_timestamp_prefix(),
+        message.as_ref()
+    );
 }
 
 pub(crate) async fn connect_outbound(host: &str, port: u16, iface: &str) -> Result<TcpStream> {
