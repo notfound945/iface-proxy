@@ -2,6 +2,7 @@ use std::ffi::CString;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::io;
 
 use anyhow::Result;
 use tokio::net::{lookup_host, TcpSocket, TcpStream};
@@ -148,6 +149,61 @@ pub(crate) fn log_error(message: impl AsRef<str>) {
         current_timestamp_prefix(),
         message.as_ref()
     );
+}
+
+pub(crate) fn is_transient_anyhow_error(err: &anyhow::Error) -> bool {
+    if let Some(ioe) = err.downcast_ref::<io::Error>() {
+        return matches!(
+            ioe.kind(),
+            io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::UnexpectedEof
+        );
+    }
+    let s = err.to_string().to_lowercase();
+    s.contains("broken pipe")
+        || s.contains("connection reset")
+        || s.contains("timed out")
+        || s.contains("connection aborted")
+        || s.contains("unexpected eof")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn try_raise_nofile_limit(min_soft: u64) {
+    unsafe {
+        let mut lim = nix::libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            log_error("getrlimit(RLIMIT_NOFILE) failed");
+            return;
+        }
+        let mut new_lim = lim;
+        if new_lim.rlim_cur < min_soft as u64 {
+            new_lim.rlim_cur = min_soft as u64;
+        }
+        if new_lim.rlim_max < new_lim.rlim_cur {
+            new_lim.rlim_max = new_lim.rlim_cur;
+        }
+        if nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &new_lim) != 0 {
+            log_log(format!(
+                "NOFILE raise attempt failed; current soft={}, hard={}",
+                lim.rlim_cur, lim.rlim_max
+            ));
+        } else {
+            let mut after = nix::libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            let _ = nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &mut after);
+            log_log(format!(
+                "NOFILE limit: soft={} hard={}",
+                after.rlim_cur, after.rlim_max
+            ));
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn try_raise_nofile_limit(_min_soft: u64) {
+    // No-op on unsupported targets
 }
 
 pub(crate) async fn connect_outbound(host: &str, port: u16, iface: &str) -> Result<TcpStream> {

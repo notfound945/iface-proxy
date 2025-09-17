@@ -1,8 +1,11 @@
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, timeout, Duration};
 
-use crate::util::{connect_outbound, log_throttled, log_info, log_error};
+use crate::util::{connect_outbound, log_throttled, log_info, log_error, is_transient_anyhow_error};
 
 async fn read_http_headers(stream: &mut TcpStream) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(4096);
@@ -41,8 +44,8 @@ fn parse_host_from_headers(headers: &str) -> Option<String> {
     None
 }
 
-async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
-    let raw = read_http_headers(&mut inbound).await?;
+async fn handle_http_proxy(mut inbound: TcpStream, iface: &str, read_timeout_ms: u64, session_timeout_ms: u64) -> Result<()> {
+    let raw = timeout(Duration::from_millis(read_timeout_ms), read_http_headers(&mut inbound)).await??;
     let (header_end, body_start) = split_headers_body(&raw).ok_or_else(|| anyhow::anyhow!("bad headers"))?;
     let headers_str = String::from_utf8_lossy(&raw[..header_end]).to_string();
     let (method, uri, version) = parse_request_line(&headers_str)?;
@@ -54,7 +57,7 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
         log_throttled(|| log_info(format!("HTTP CONNECT -> {}:{} (iface: {})", host, port, iface)));
         let mut outbound = connect_outbound(host, port, iface).await?;
         inbound.write_all(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: iface-proxy\r\n\r\n").await?;
-        let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
+        let (c2s, s2c) = timeout(Duration::from_millis(session_timeout_ms), copy_bidirectional(&mut inbound, &mut outbound)).await??;
         log_throttled(|| log_info(format!("HTTP CONNECT finished {}:{} (c->s: {} bytes, s->c: {} bytes)", host, port, c2s, s2c)));
         return Ok(());
     }
@@ -89,26 +92,52 @@ async fn handle_http_proxy(mut inbound: TcpStream, iface: &str) -> Result<()> {
 
     outbound.write_all(rebuilt.as_bytes()).await?;
     if !body_start.is_empty() { inbound.write_all(body_start).await?; }
-    let (c2s, s2c) = copy_bidirectional(&mut inbound, &mut outbound).await?;
+    let (c2s, s2c) = timeout(Duration::from_millis(session_timeout_ms), copy_bidirectional(&mut inbound, &mut outbound)).await??;
     log_throttled(|| log_info(format!("HTTP finished {} {} (c->s: {} bytes, s->c: {} bytes)", method, host, c2s, s2c)));
     Ok(())
 }
 
-pub async fn run_http_proxy(iface: &str, listen: &str) -> Result<()> {
+pub async fn run_http_proxy(iface: &str, listen: &str, sem: Arc<Semaphore>, read_timeout_ms: u64, session_timeout_ms: u64) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     log_info(format!("HTTP proxy listening on {}, bound to {}", listen, iface));
+    let mut backoff_ms: u64 = 50;
     loop {
-        let (inbound, peer_addr) = listener.accept().await?;
+        let (inbound, peer_addr) = match listener.accept().await {
+            Ok(v) => {
+                backoff_ms = 50; // reset backoff on success
+                v
+            }
+            Err(e) => {
+                log_error(format!("accept error: {}", e));
+                sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms.saturating_mul(2)).min(1000);
+                continue;
+            }
+        };
         let listen_for_log = listen.to_string();
         log_throttled(|| log_info(format!(
             "Incoming TCP connection from {} -> listening on {} (iface: {})",
             peer_addr, listen_for_log, iface
         )));
         let iface_for_task = iface.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = handle_http_proxy(inbound, &iface_for_task).await {
-                log_error(format!("TCP handler error: {}", e));
+        let sem_clone = sem.clone();
+        match sem_clone.try_acquire_owned() {
+            Ok(permit) => {
+                tokio::spawn(async move {
+                    let _permit = permit; // held for lifetime of task
+                    if let Err(e) = handle_http_proxy(inbound, &iface_for_task, read_timeout_ms, session_timeout_ms).await {
+                        if is_transient_anyhow_error(&e) {
+                            log_info(format!("TCP handler transient: {}", e));
+                        } else {
+                            log_error(format!("TCP handler error: {}", e));
+                        }
+                    }
+                });
             }
-        });
+            Err(_) => {
+                log_throttled(|| log_info("too many concurrent connections; dropping new HTTP connection"));
+                // inbound dropped here
+            }
+        }
     }
 }

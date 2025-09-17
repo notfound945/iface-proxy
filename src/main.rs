@@ -10,6 +10,8 @@ fn print_help() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 尝试提高 NOFILE 软/硬限制（不保证成功）
+    crate::util::try_raise_nofile_limit(65536);
     // 解析命令行参数中的 --iface/-i，默认 en0
     let mut iface = String::from("en0");
     let mut listen = String::from("127.0.0.1:7890");
@@ -17,6 +19,9 @@ async fn main() -> Result<()> {
     let mut socks5_user: Option<String> = None;
     let mut socks5_pass: Option<String> = None;
     let mut enable_socks5 = false;
+    let mut max_conns: usize = 10000;
+    let mut read_timeout_ms: u64 = 10000;
+    let mut session_timeout_ms: u64 = 600_000; // 10min
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" { print_help(); return Ok(()); }
@@ -42,14 +47,28 @@ async fn main() -> Result<()> {
             if let Some(val) = args.next() { socks5_pass = Some(val); }
         } else if let Some(val) = arg.strip_prefix("--socks5-pass=") {
             socks5_pass = Some(val.to_string());
+        } else if arg == "--max-conns" {
+            if let Some(val) = args.next() { max_conns = val.parse().unwrap_or(max_conns); }
+        } else if let Some(val) = arg.strip_prefix("--max-conns=") {
+            max_conns = val.parse().unwrap_or(max_conns);
+        } else if arg == "--read-timeout-ms" {
+            if let Some(val) = args.next() { read_timeout_ms = val.parse().unwrap_or(read_timeout_ms); }
+        } else if let Some(val) = arg.strip_prefix("--read-timeout-ms=") {
+            read_timeout_ms = val.parse().unwrap_or(read_timeout_ms);
+        } else if arg == "--session-timeout-ms" {
+            if let Some(val) = args.next() { session_timeout_ms = val.parse().unwrap_or(session_timeout_ms); }
+        } else if let Some(val) = arg.strip_prefix("--session-timeout-ms=") {
+            session_timeout_ms = val.parse().unwrap_or(session_timeout_ms);
         }
     }
 
     let http_iface = iface.clone();
     let http_listen = listen.clone();
     // 主端口固定 HTTP/1.x 代理
+    let http_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_conns));
+    let http_sem_clone = http_sem.clone();
     let http_task = tokio::spawn(async move {
-        if let Err(e) = http_proxy::run_http_proxy(&http_iface, &http_listen).await {
+        if let Err(e) = http_proxy::run_http_proxy(&http_iface, &http_listen, http_sem_clone, read_timeout_ms, session_timeout_ms).await {
             crate::util::log_error(format!("HTTP proxy fatal error: {}", e));
         }
     });
@@ -59,8 +78,9 @@ async fn main() -> Result<()> {
             let s5_iface = iface.clone();
             let s5_user_cloned = socks5_user.clone();
             let s5_pass_cloned = socks5_pass.clone();
+            let s5_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_conns));
             tokio::spawn(async move {
-                if let Err(e) = socks5::run_socks5_proxy_auth(&s5_iface, &s5_addr, s5_user_cloned.as_deref(), s5_pass_cloned.as_deref()).await {
+                if let Err(e) = socks5::run_socks5_proxy_auth(&s5_iface, &s5_addr, s5_user_cloned.as_deref(), s5_pass_cloned.as_deref(), s5_sem, read_timeout_ms, session_timeout_ms).await {
                     crate::util::log_error(format!("SOCKS5 proxy fatal error: {}", e));
                 }
             });
