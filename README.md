@@ -103,7 +103,9 @@ curl -I https://example.com -v
 - HTTPS：处理 `CONNECT host:port`，返回 `200 Connection Established` 后透明转发 TLS 流量。
 - SOCKS5：支持 CONNECT；可选用户名/密码认证。
 - 出站连接支持 IPv4/IPv6，并在 `connect` 前绑定指定网卡。
-- 日志输出有全局每秒限频（默认 50 条）。可在 `src/main.rs` 中调整 `LOGS_PER_SEC`。
+- 日志输出有全局每秒限频（默认 50 条）。可在 `src/util.rs` 中调整 `LOGS_PER_SEC`。
+- 日志自带本地时间戳与颜色分级（INFO/LOG/ERROR）。
+- 监听 accept 出错（如 EMFILE）会指数退避并继续运行，避免进程退出。
 
 ## 权限与平台注意
 
@@ -120,7 +122,24 @@ make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7081 USER=user PASS=pa
 make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=1 USER=user PASS=pass
 make strip           # 去符号减小体积（macOS）
 make linux-musl      # 构建 Linux musl 静态二进制
+
+# 压测（内置 simple stress 工具）
+make stress-build
+make stress STRESS_TARGET=127.0.0.1:7890 STRESS_MODE=http STRESS_PAYLOAD=http://example.com/ STRESS_CONNS=1000 STRESS_DURATION=120
+make stress-connect STRESS_TARGET=127.0.0.1:7890 STRESS_CONNS=2000
+make stress-idle STRESS_TARGET=127.0.0.1:7890 STRESS_CONNS=5000 STRESS_DURATION=120
 ```
+
+## 进阶参数与建议
+
+- 并发与超时（启动参数）：
+  - `--max-conns <N>`：最大并发连接数（默认 10000）。超限的新连接将被丢弃并记录日志。
+  - `--read-timeout-ms <MS>`：读取请求首部/握手的超时（默认 10000）。
+  - `--session-timeout-ms <MS>`：单连接转发会话的超时（默认 600000，10 分钟）。
+- 文件描述符上限：
+  - 建议在 shell 中提升：`ulimit -n 65536`
+  - 程序启动会尝试提升 NOFILE 软/硬限制，并在日志中打印结果。
+- 日志降噪：常见瞬时网络错误（Broken pipe、Connection reset、Timeout 等）会降级为 INFO。
 
 ## 限制与路线图
 
