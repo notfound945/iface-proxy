@@ -34,9 +34,9 @@ download() {
 get_latest_tag() {
   api_url="https://api.github.com/repos/$REPO/releases/latest"
   if have_cmd curl; then
-    curl -fsSL "$api_url" | sed -n 's/.*"tag_name"\s*:\s*"\([^"]*\)".*/\1/p' | head -n1
+    curl -fsSL "$api_url" | sed -E -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
   elif have_cmd wget; then
-    wget -qO- "$api_url" | sed -n 's/.*"tag_name"\s*:\s*"\([^"]*\)".*/\1/p' | head -n1
+    wget -qO- "$api_url" | sed -E -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
   else
     echo "" # Should not happen; guarded by download()
   fi
