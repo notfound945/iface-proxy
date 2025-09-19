@@ -1,3 +1,4 @@
+
 ## 工具简介
 
 一个支持 http_proxy/https_proxy 与 socks5 的本地代理，默认监听 `127.0.0.1:7890`（HTTP）。SOCKS5 默认关闭，可通过 `--socks5` 启用，并可用 `--socks5-listen` 指定监听地址；外发连接可绑定到指定网卡，便于控制出站接口。
@@ -5,36 +6,50 @@
 - **协议**: HTTP 代理（仅 HTTP/1.x；HTTPS 的 CONNECT 隧道）、SOCKS5（支持无认证与用户名/密码认证）
 - **监听**: HTTP 通过 `--listen` 指定（默认 127.0.0.1:7890 或你的传参）；SOCKS5 通过 `--socks5` 启用，默认 `127.0.0.1:7080`（可用 `--socks5-listen` 覆盖）
 
+### 开发背景
+
+多网口时，指定流量出口，通过 http_proxy/https_proxy 使用。
+
+## 快速开始
+
+### 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/notfound945/iface-proxy/refs/heads/master/scripts/install.sh | sh
+## 或者 ##
+wget -qO- https://raw.githubusercontent.com/notfound945/iface-proxy/refs/heads/master/scripts/install.sh | sh
+```
+
 ### 默认参数与启用示例
 
 - **HTTP 默认监听**: `127.0.0.1:7890`（或按 `--listen` 覆盖）
 - **SOCKS5 默认监听**: `127.0.0.1:7080`（可按 `--socks5-listen` 覆盖）
 
 ```bash
+# 查看版本
+iface-proxy --version
+
+# 查看帮助
+iface-proxy --help
+
 # 默认仅启用 HTTP
-./target/release/iface-proxy --iface en0
+iface-proxy --iface en0
 
 # 自定义 HTTP 监听
-./target/release/iface-proxy --iface en0 --listen 127.0.0.1:8080
+iface-proxy --iface en0 --listen 127.0.0.1:8080
 
 # 启用 SOCKS5（默认 127.0.0.1:7080）
-./target/release/iface-proxy --iface en0 --socks5
+iface-proxy --iface en0 --socks5
 
 # 自定义 SOCKS5 监听
-./target/release/iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:7081
+iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:7081
 
 # 启用 SOCKS5（用户名/密码）
-./target/release/iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:7080 \
+iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:7080 \
   --socks5-user user --socks5-pass pass
 ```
-- **出站绑定**: 通过 `--iface` 指定网卡（macOS 使用 IP_BOUND_IF，Linux 使用 SO_BINDTODEVICE）
+- **出站绑定**: 通过 `--iface` 指定网卡（macOS 使用 IP_BOUND_IF）
 - **日志**: 内置每秒限频（默认 50 条/秒），新秒开始会打印上一秒抑制数量
-
-### 开发背景
-
-多网口时，指定流量出口，通过 http_proxy/https_proxy 使用。
-
-## 快速开始
 
 ### 编译
 ```bash
@@ -51,7 +66,7 @@ make run-release IFACE=en0
 
 ### 运行
 ```bash
-./target/release/iface-proxy --iface en0 --listen 127.0.0.1:7890
+iface-proxy --iface en0 --listen 127.0.0.1:7890
 # 日志示例：
 # HTTP proxy listening on 127.0.0.1:7890, bound to en0
 ```
@@ -59,10 +74,6 @@ make run-release IFACE=en0
 macOS 可用以下命令查看网卡名（常见为 `en0`/`en1`）：
 ```bash
 networksetup -listallhardwareports
-```
-Linux 查看网卡：
-```bash
-ip link
 ```
 
 ## 使用方式
@@ -110,7 +121,6 @@ curl -I https://example.com -v
 ## 权限与平台注意
 
 - macOS：`--iface` 应填如 `en0` 的实际网卡名；通过 IP_BOUND_IF 绑定。
-- Linux：使用 SO_BINDTODEVICE，通常需要 root 或 `CAP_NET_ADMIN` 权限。
 
 ## Makefile 速览
 
@@ -121,7 +131,6 @@ make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=1 USER=user PASS=pass
 make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=127.0.0.1:7081 USER=user PASS=pass
 make run-release IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=1 USER=user PASS=pass
 make strip           # 去符号减小体积（macOS）
-make linux-musl      # 构建 Linux musl 静态二进制
 
 # 压测（内置 simple stress 工具）
 make stress-build
