@@ -5,7 +5,7 @@ mod http_proxy;
 mod socks5;
 
 fn print_help() {
-    println!("iface-proxy - 本地 HTTP/HTTPS 与 SOCKS5 代理 (仅 HTTP/1.x)\n\n用法:\n  iface-proxy [OPTIONS]\n\n常用参数:\n  -i, --iface <NAME>              指定外发网卡名称 (默认: en0)\n  -l, --listen <ADDR:PORT>        HTTP 代理监听地址 (默认: 127.0.0.1:7890，HTTP/1.x)\n      --socks5                    启用 SOCKS5 代理（默认关闭）\n  -S, --socks5-listen <ADDR:PORT> SOCKS5 监听地址 (默认: 127.0.0.1:7080，与 --socks5 配合使用)\n  -h, --help                      显示本帮助并退出\n\n说明:\n- 默认仅启动 HTTP(127.0.0.1:7890，HTTP/1.x)。使用 --socks5 才会启用 SOCKS5(默认 127.0.0.1:7080)。\n- 出站连接将绑定到指定网卡 (--iface)。\n示例:\n  iface-proxy --iface en0\n  iface-proxy --iface en0 --socks5\n  iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:1081\n  iface-proxy --iface en0 --listen 127.0.0.1:8080\n");
+    println!("iface-proxy - 本地 HTTP/HTTPS 与 SOCKS5 代理 (仅 HTTP/1.x)\n\n用法:\n  iface-proxy [OPTIONS]\n\n常用参数:\n  -i, --iface <NAME>              指定外发网卡名称 (默认: en0)\n  -l, --listen <ADDR:PORT>        HTTP 代理监听地址 (默认: 127.0.0.1:7890，HTTP/1.x)\n      --socks5                    启用 SOCKS5 代理（默认关闭）\n  -S, --socks5-listen <ADDR:PORT> SOCKS5 监听地址 (默认: 127.0.0.1:7080，与 --socks5 配合使用)\n  -v, --version                   显示版本并退出\n  -h, --help                      显示本帮助并退出\n\n说明:\n- 默认仅启动 HTTP(127.0.0.1:7890，HTTP/1.x)。使用 --socks5 才会启用 SOCKS5(默认 127.0.0.1:7080)。\n- 出站连接将绑定到指定网卡 (--iface)。\n示例:\n  iface-proxy --iface en0\n  iface-proxy --iface en0 --socks5\n  iface-proxy --iface en0 --socks5 --socks5-listen 127.0.0.1:1081\n  iface-proxy --iface en0 --listen 127.0.0.1:8080\n");
 }
 
 #[tokio::main]
@@ -25,6 +25,7 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" { print_help(); return Ok(()); }
+        if arg == "--version" || arg == "-v" { println!("{}", env!("IFACE_PROXY_VERSION")); return Ok(()); }
         if arg == "--iface" || arg == "-i" {
             if let Some(val) = args.next() { iface = val; }
         } else if let Some(val) = arg.strip_prefix("--iface=") {

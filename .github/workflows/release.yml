@@ -27,6 +27,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build (macOS)
+        env:
+          IFACE_PROXY_VERSION: ${{ github.ref_name }}
         run: cargo build --release --locked
 
       - name: Package archive (macOS)
