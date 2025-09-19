@@ -2,7 +2,6 @@ BIN := iface-proxy
 CARGO := cargo
 TARGET_DIR := target
 RELEASE_DIR := $(TARGET_DIR)/release
-LINUX_TARGET := x86_64-unknown-linux-musl
 
 # 可覆盖：make run IFACE=en0 LISTEN=127.0.0.1:7890 SOCKS5=1 or SOCKS5=127.0.0.1:7081 USER=foo PASS=bar
 IFACE ?= en0
@@ -12,8 +11,8 @@ USER ?=
 PASS ?=
 NO_SOCKS5 ?=
 
-.PHONY: all help build release run run-release strip clean linux-musl \
-	stress-build stress stress-http stress-connect stress-idle
+.PHONY: all help build release run run-release strip clean \
+    	stress-build stress stress-http stress-connect stress-idle
 
 all: release
 
@@ -29,7 +28,6 @@ help:
 	@echo "  stress-connect- Run CONNECT stress (override vars as needed)"
 	@echo "  stress-idle   - Run idle-conn stress (override vars as needed)"
 	@echo "  strip         - Strip release binary (macOS)"
-	@echo "  linux-musl    - Build static Linux musl binary"
 	@echo "  clean         - Clean cargo artifacts"
 
 build:
@@ -69,10 +67,7 @@ stress-idle:
 strip: release
 	strip -x $(RELEASE_DIR)/$(BIN)
 
-linux-musl:
-	rustup target add $(LINUX_TARGET) || true
-	$(CARGO) build --release --target $(LINUX_TARGET)
-	@echo "Binary: $(TARGET_DIR)/$(LINUX_TARGET)/release/$(BIN)"
+ 
 
 clean:
 	$(CARGO) clean

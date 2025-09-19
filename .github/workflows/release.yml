@@ -13,20 +13,8 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.platform }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x86_64-musl
-            target: x86_64-unknown-linux-musl
-            archive: tar.gz
-          - os: macos-latest
-            platform: macos
-            target: ''
-            archive: tar.gz
+    name: Build (macos)
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -38,45 +26,21 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: Install musl tools (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-
-      - name: Add target (if specified)
-        if: matrix.target != ''
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Build (Linux musl)
-        if: matrix.platform == 'linux-x86_64-musl'
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
       - name: Build (macOS)
-        if: matrix.platform != 'linux-x86_64-musl'
         run: cargo build --release --locked
 
-      - name: Package archive (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          mkdir -p dist
-          BIN_PATH=target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
-          ARCHIVE_NAME=${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
-          tar -C $(dirname "$BIN_PATH") -czf dist/$ARCHIVE_NAME $(basename "$BIN_PATH")
-
       - name: Package archive (macOS)
-        if: matrix.os == 'macos-latest'
         run: |
           mkdir -p dist
           BIN_PATH=target/release/${{ env.BINARY_NAME }}
-          ARCHIVE_NAME=${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+          ARCHIVE_NAME=${{ env.BINARY_NAME }}-${{ github.ref_name }}-macos.tar.gz
           tar -C $(dirname "$BIN_PATH") -czf dist/$ARCHIVE_NAME $(basename "$BIN_PATH")
 
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.platform }}
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-macos
           path: dist/*
 
   release:
@@ -84,11 +48,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download all build artifacts
+      - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          pattern: ${{ env.BINARY_NAME }}-*-*
-          merge-multiple: true
+          name: ${{ env.BINARY_NAME }}-${{ github.ref_name }}-macos
           path: dist
 
       - name: Generate checksums

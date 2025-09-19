@@ -38,14 +38,6 @@ pub(crate) fn bind_iface_v4(fd: i32, iface: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) fn bind_iface_v4(fd: i32, iface: &str) -> Result<()> {
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::BindToDevice;
-    setsockopt(fd, BindToDevice, iface.as_bytes())?;
-    Ok(())
-}
-
 #[cfg(target_os = "macos")]
 pub(crate) fn bind_iface_v6(fd: i32, iface: &str) -> Result<()> {
     let idx = iface_index(iface)?;
@@ -61,14 +53,6 @@ pub(crate) fn bind_iface_v6(fd: i32, iface: &str) -> Result<()> {
     if ret != 0 {
         anyhow::bail!("setsockopt(IPV6_BOUND_IF) failed");
     }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn bind_iface_v6(fd: i32, iface: &str) -> Result<()> {
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::BindToDevice;
-    setsockopt(fd, BindToDevice, iface.as_bytes())?;
     Ok(())
 }
 
@@ -170,7 +154,7 @@ pub(crate) fn is_transient_anyhow_error(err: &anyhow::Error) -> bool {
         || s.contains("unexpected eof")
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 pub(crate) fn try_raise_nofile_limit(min_soft: u64) {
     unsafe {
         let mut lim = nix::libc::rlimit { rlim_cur: 0, rlim_max: 0 };
@@ -201,7 +185,7 @@ pub(crate) fn try_raise_nofile_limit(min_soft: u64) {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn try_raise_nofile_limit(_min_soft: u64) {
     // No-op on unsupported targets
 }
