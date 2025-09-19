@@ -45,6 +45,7 @@ get_latest_tag() {
 VERSION="${VERSION:-}"
 if [ -z "$VERSION" ]; then
   VERSION="$(get_latest_tag)"
+  echo "Latest release: $VERSION"
 fi
 
 if [ -z "$VERSION" ]; then
